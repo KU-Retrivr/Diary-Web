@@ -7,6 +7,10 @@ export function getTodayDate() {
   return `${year}-${month}-${day}`;
 }
 
+export function toMonthKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
 export function formatDiaryDate(dateString) {
   if (!dateString) {
     return '날짜 없음';

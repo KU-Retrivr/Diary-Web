@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
+import { deleteDiary, getDiaries, upsertDiary } from './services/diaryService';
+import { getTodayDate, toMonthKey } from './utils/date';
 
 const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const weekdayLabels = ['일', '월', '화', '수', '목', '금', '토'];
@@ -41,9 +43,13 @@ function readFileAsDataUrl(file) {
   });
 }
 
+function formatApiError(error, fallbackMessage) {
+  return error?.message || fallbackMessage;
+}
+
 export default function App() {
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const [emotion, setEmotion] = useState('무난');
+  const [date, setDate] = useState(getTodayDate());
+  const [emotion, setEmotion] = useState('평온');
   const [content, setContent] = useState('');
   const [selectedFileName, setSelectedFileName] = useState('');
   const [imagePreviewUrl, setImagePreviewUrl] = useState('');
@@ -52,11 +58,18 @@ export default function App() {
   const [entries, setEntries] = useState([]);
   const [openedEntry, setOpenedEntry] = useState(null);
   const [showEmptyMessage, setShowEmptyMessage] = useState(false);
+  const [isListLoading, setIsListLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [listError, setListError] = useState('');
+  const [submitError, setSubmitError] = useState('');
+  const [submitSuccess, setSubmitSuccess] = useState('');
   const [displayedMonth, setDisplayedMonth] = useState(() => {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), 1);
   });
 
+  const displayedMonthKey = toMonthKey(displayedMonth);
   const calendarDays = useMemo(() => createCalendarDays(displayedMonth), [displayedMonth]);
   const monthLabel = `${displayedMonth.getFullYear()}년 ${displayedMonth.getMonth() + 1}월`;
   const entryMap = useMemo(() => {
@@ -65,6 +78,7 @@ export default function App() {
       return accumulator;
     }, {});
   }, [entries]);
+  const selectedEntry = entryMap[date] || null;
   const timeParts = currentTime
     .toLocaleTimeString('en-US', { hour12: true })
     .replace(',', '')
@@ -89,12 +103,63 @@ export default function App() {
     };
   }, []);
 
-  const handleImageSelect = async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) {
+  useEffect(() => {
+    let ignore = false;
+
+    async function loadEntries() {
+      setIsListLoading(true);
+      setListError('');
+
+      try {
+        const diaries = await getDiaries(displayedMonthKey);
+        if (!ignore) {
+          setEntries(diaries);
+        }
+      } catch (error) {
+        if (!ignore) {
+          setEntries([]);
+          setListError(formatApiError(error, '일기 목록을 불러오지 못했습니다.'));
+        }
+      } finally {
+        if (!ignore) {
+          setIsListLoading(false);
+        }
+      }
+    }
+
+    loadEntries();
+
+    return () => {
+      ignore = true;
+    };
+  }, [displayedMonthKey]);
+
+  useEffect(() => {
+    setSubmitError('');
+    setSubmitSuccess('');
+
+    if (!selectedEntry) {
+      setEmotion('평온');
+      setContent('');
       setSelectedFileName('');
       setImagePreviewUrl('');
       setSelectedImageDataUrl('');
+      return;
+    }
+
+    setEmotion(selectedEntry.emotion || '평온');
+    setContent(selectedEntry.content || '');
+    setSelectedFileName(selectedEntry.imageUrl ? '기존 이미지' : '');
+    setImagePreviewUrl(selectedEntry.imageUrl || '');
+    setSelectedImageDataUrl(selectedEntry.imageUrl || '');
+  }, [date, selectedEntry]);
+
+  const handleImageSelect = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      setSelectedFileName(selectedEntry?.imageUrl ? '기존 이미지' : '');
+      setImagePreviewUrl(selectedEntry?.imageUrl || '');
+      setSelectedImageDataUrl(selectedEntry?.imageUrl || '');
       return;
     }
 
@@ -104,27 +169,63 @@ export default function App() {
       setImagePreviewUrl(dataUrl);
       setSelectedImageDataUrl(dataUrl);
     } catch (error) {
-      // eslint-disable-next-line no-alert
-      alert(error.message);
+      setSubmitError(error.message);
     }
   };
 
-  const handleSave = () => {
-    setEntries((previous) => {
-      const filtered = previous.filter((entry) => entry.date !== date);
-      return [
-        ...filtered,
-        {
-          date,
-          emotion,
-          content,
-          imageUrl: selectedImageDataUrl,
-        },
-      ];
-    });
+  const handleSave = async () => {
+    setSubmitError('');
+    setSubmitSuccess('');
 
-    // eslint-disable-next-line no-alert
-    alert('기록이 저장되었습니다.');
+    try {
+      setIsSubmitting(true);
+      const savedDiary = await upsertDiary(date, {
+        date,
+        emotion: emotion || null,
+        content,
+        imageUrl: selectedImageDataUrl || null,
+      });
+
+      if (savedDiary.date.startsWith(displayedMonthKey)) {
+        setEntries((previous) => {
+          const filtered = previous.filter((entry) => entry.date !== savedDiary.date);
+          return [...filtered, savedDiary].sort((left, right) => left.date.localeCompare(right.date));
+        });
+      }
+
+      setOpenedEntry(savedDiary);
+      setSubmitSuccess('일기가 저장되었습니다.');
+    } catch (error) {
+      setSubmitError(formatApiError(error, '일기를 저장하지 못했습니다.'));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDelete = async (targetDate) => {
+    setSubmitError('');
+    setSubmitSuccess('');
+
+    try {
+      setIsDeleting(true);
+      await deleteDiary(targetDate);
+      setEntries((previous) => previous.filter((entry) => entry.date !== targetDate));
+      setOpenedEntry(null);
+
+      if (date === targetDate) {
+        setEmotion('평온');
+        setContent('');
+        setSelectedFileName('');
+        setImagePreviewUrl('');
+        setSelectedImageDataUrl('');
+      }
+
+      setSubmitSuccess('일기가 삭제되었습니다.');
+    } catch (error) {
+      setSubmitError(formatApiError(error, '일기를 삭제하지 못했습니다.'));
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const handlePrevMonth = () => {
@@ -140,14 +241,18 @@ export default function App() {
   };
 
   const handleOpenEntry = (entry, dateKey) => {
+    setDate(dateKey);
+
     if (!entry) {
+      setOpenedEntry(null);
       setShowEmptyMessage(false);
       window.setTimeout(() => {
         setShowEmptyMessage(true);
       }, 10);
       return;
     }
-    setOpenedEntry({ ...entry, date: dateKey });
+
+    setOpenedEntry(entry);
   };
 
   const handleCloseEntry = () => {
@@ -183,7 +288,7 @@ export default function App() {
           </label>
 
           <div className="field emotion-field">
-            <span className="field-title" aria-hidden="true" />
+            <span className="field-title">감정</span>
             <div className="emotion-toggle-group">
               {emotionOptions.map((option) => (
                 <button
@@ -199,7 +304,7 @@ export default function App() {
           </div>
 
           <label className="field">
-            <span className="field-title" aria-hidden="true" />
+            <span className="field-title">내용</span>
             <textarea
               placeholder="오늘의 감정과 사건을 기록해보세요."
               value={content}
@@ -219,8 +324,16 @@ export default function App() {
             )}
           </label>
 
-          <button type="button" className="save-button full-width" onClick={handleSave}>
-            저장하기
+          {submitError && <p className="status-message error">{submitError}</p>}
+          {submitSuccess && <p className="status-message success">{submitSuccess}</p>}
+
+          <button
+            type="button"
+            className="save-button full-width"
+            onClick={handleSave}
+            disabled={isSubmitting}
+          >
+            {isSubmitting ? '저장 중...' : selectedEntry ? '수정하기' : '저장하기'}
           </button>
         </section>
 
@@ -238,6 +351,9 @@ export default function App() {
             </div>
           </div>
 
+          {listError && <p className="status-message error">{listError}</p>}
+          {isListLoading && <p className="status-message info">일기 목록을 불러오는 중입니다.</p>}
+
           <div className="weekdays">
             {weekdays.map((weekday) => (
               <div key={weekday}>{weekday}</div>
@@ -245,7 +361,7 @@ export default function App() {
           </div>
 
           <div className="calendar-grid">
-            {calendarDays.map((day, index) => (
+            {calendarDays.map((day, index) =>
               day ? (
                 (() => {
                   const dateKey = toDateKey(
@@ -262,10 +378,9 @@ export default function App() {
                       className={`day-cell ${hasImage ? 'has-image' : ''} ${entry ? 'has-entry' : ''}`}
                       style={hasImage ? { backgroundImage: `url(${entry.imageUrl})` } : undefined}
                       onClick={() => handleOpenEntry(entry, dateKey)}
-                      role={entry ? 'button' : undefined}
-                      tabIndex={entry ? 0 : undefined}
+                      role="button"
+                      tabIndex={0}
                       onKeyDown={(event) => {
-                        if (!entry) return;
                         if (event.key === 'Enter' || event.key === ' ') {
                           event.preventDefault();
                           handleOpenEntry(entry, dateKey);
@@ -277,9 +392,9 @@ export default function App() {
                   );
                 })()
               ) : (
-                <div key={`${day}-${index}`} className="day-cell empty" />
-              )
-            ))}
+                <div key={`empty-${index}`} className="day-cell empty" />
+              ),
+            )}
           </div>
         </section>
       </main>
@@ -297,9 +412,19 @@ export default function App() {
           <div className="entry-modal" onClick={(event) => event.stopPropagation()}>
             <div className="entry-modal-header">
               <h3>{openedEntry.date} 기록</h3>
-              <button type="button" className="entry-modal-close" onClick={handleCloseEntry}>
-                닫기
-              </button>
+              <div className="entry-modal-actions">
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={() => handleDelete(openedEntry.date)}
+                  disabled={isDeleting}
+                >
+                  {isDeleting ? '삭제 중...' : '삭제'}
+                </button>
+                <button type="button" className="entry-modal-close" onClick={handleCloseEntry}>
+                  닫기
+                </button>
+              </div>
             </div>
 
             {openedEntry.imageUrl && (
@@ -308,8 +433,10 @@ export default function App() {
               </div>
             )}
 
-            <p className="entry-modal-content">{openedEntry.content || '저장된 기록 내용이 없습니다.'}</p>
-            <p className="entry-modal-emotion">감정: {openedEntry.emotion || '무난'}</p>
+            <p className="entry-modal-content">
+              {openedEntry.content || '저장된 기록 내용이 없습니다.'}
+            </p>
+            <p className="entry-modal-emotion">감정: {openedEntry.emotion || '평온'}</p>
           </div>
         </div>
       )}
